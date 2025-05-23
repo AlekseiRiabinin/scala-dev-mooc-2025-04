@@ -139,7 +139,10 @@ object opt {
 
     def map[B](f: T => B): Option[B] = flatMap(v => Option(f(v)))
 
-    def flatMap[B](f: T => Option[B]): Option[B] = ???
+    def flatMap[B](f: T => Option[B]): Option[B] = this match {
+      case Some(value) => f(value)  // Apply the function if Some
+      case None        => None      // Propagate None
+    }
   }
 
   case class Some[T](v: T) extends Option[T]
@@ -164,7 +167,7 @@ object opt {
   def printIfAny[T](value: T): Unit = {
     Option(value) match {
       case Some(v) => println(v)
-      case None => ()
+      case None =>
     }
   }
 
@@ -203,7 +206,7 @@ object list {
   sealed trait List[+T] {
 
     // prepend
-    def ::[TT >: T](elem: TT): List[TT] = ???
+    def ::[TT >: T](elem: TT): List[TT] = new ::(elem, this)
 
     /**
       *
