@@ -1,41 +1,16 @@
 package ru.otus
 
-import scala.collection.View
+import ru.otus.module1.{concurrency, executors, future}
+import ru.otus.module1.concurrency.{getRatesLocation1, getRatesLocation2, printRunningTime}
+import ru.otus.module2.{implicits, type_classes}
+
+import scala.util.{Failure, Success}
 
 
 object App {
   def main(args: Array[String]): Unit = {
 
-
-    val list = List(1, 2, 3)
-
-    val lazyList = LazyList(1, 2, 3)
-
-    println(list)
-    println(lazyList)
-
-    val r1: View[Int] = list.view.map{ i =>
-      println(s"map $i")
-      i + 1
-    }.filter{ i =>
-      println(s"filter $i")
-      i % 2 == 0
-    }
-
-    val r2 = lazyList.map{ i =>
-      println(s"map lazy $i")
-      i + 1
-    }.filter{ i =>
-      println(s"filter lazy $i")
-      i % 2 == 0
-    }
-
-    val r3 = r1.to(List)
-
-    val r4 = lazyList.zip(list)
-
-    println(r4)
-
-
+    println(s"Hello from ${Thread.currentThread().getName}")
+    println(type_classes.result)
   }
 }
