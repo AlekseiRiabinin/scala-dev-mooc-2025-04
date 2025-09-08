@@ -10,6 +10,7 @@ import org.http4s.ember.server.EmberServerBuilder
 import com.comcast.ip4s.{Host, Port}
 import org.http4s.server.{AuthMiddleware, Router}
 import org.typelevel.ci.CIStringSyntax
+import org.http4s.{Method, Request, Status, Uri}
 import cats.implicits.toSemigroupKOps
 
 
@@ -149,5 +150,23 @@ object mainServer extends IOApp.Simple {
     //Restfull.server2.use(_=>IO.never)
     //Restfull.serverSessionServer.use(_ => IO.never)
     Restfull.serverSessionAuthServer.use(_ => IO.never)
+  }
+}
+
+object Test extends IOApp.Simple {
+  def run: IO[Unit] = {
+    val server = Restfull.serviceHelloAuth
+
+    for {
+      result <- server(AuthedRequest(Restfull.User("sdf"), Request(method = Method.GET,
+        uri = Uri.fromString("/hello").toOption.get
+      ))).value
+      _ <- result match {
+        case Some(resp) =>
+          resp.bodyText.compile.last.flatMap(body => IO.println(resp.status.isSuccess) *> IO.println(body))
+        case None => IO.println("fail")
+      }
+
+    } yield()
   }
 }
