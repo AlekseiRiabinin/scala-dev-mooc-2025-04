@@ -5,72 +5,71 @@ import akka.persistence.cassandra.query.scaladsl.CassandraReadJournal
 import akka.persistence.query.{EventEnvelope, PersistenceQuery}
 import akka.persistence.typed.PersistenceId
 import akka.persistence.typed.scaladsl.{Effect, EventSourcedBehavior}
-import akka.stream.scaladsl.Source
+import akka.stream.scaladsl.{Broadcast, Flow, GraphDSL, RunnableGraph, Sink, Source}
+import akka.stream.{ClosedShape, Graph, Materializer}
 import akka_typed.CalculatorRepository.{getLatestOffsetAndResult, initDatabase, updatedResultAndOffset}
 import akka_typed.TypedCalculatorWriteSide.{Add, Added, Command, Divide, Divided, Multiplied, Multiply}
 import com.typesafe.config.ConfigFactory
 import scalikejdbc.{ConnectionPool, ConnectionPoolSettings, DB, using}
+import scala.concurrent.{ExecutionContext, Future}
 
-
-object  akka_typed{
+object akka_typed {
 
   val persId = PersistenceId.ofUniqueId("001")
 
   trait CborSerialization
 
-  object TypedCalculatorWriteSide{
+  object TypedCalculatorWriteSide {
     sealed trait Command
     case class Add(amount: Int) extends Command
     case class Multiply(amount: Int) extends Command
     case class Divide(amount: Int) extends Command
 
     sealed trait Event extends CborSerialization
-    case class Added(id:Int, amount: Int) extends Event
-    case class Multiplied(id:Int, amount: Int) extends Event
-    case class Divided(id:Int, amount: Int) extends Event
+    case class Added(id: Int, amount: Int) extends Event
+    case class Multiplied(id: Int, amount: Int) extends Event
+    case class Divided(id: Int, amount: Int) extends Event
 
-    final case class State(value:Int) extends CborSerialization
-    {
+    final case class State(value: Double) extends CborSerialization {
       def add(amount: Int): State = copy(value = value + amount)
       def multiply(amount: Int): State = copy(value = value * amount)
       def divide(amount: Int): State = copy(value = value / amount)
     }
 
-    object State{
-      val empty = State(0)
+    object State {
+      val empty = State(0.0)
     }
 
-
     def handleCommand(
-                       persistenceId: String,
-                       state: State,
-                       command: Command,
-                       ctx: ActorContext[Command]
-                     ): Effect[Event, State] =
+        persistenceId: String,
+        state: State,
+        command: Command,
+        ctx: ActorContext[Command]
+    ): Effect[Event, State] =
       command match {
         case Add(amount) =>
           ctx.log.info(s"receive adding  for number: $amount and state is ${state.value}")
           val added = Added(persistenceId.toInt, amount)
           Effect
             .persist(added)
-            .thenRun{
-              x=> ctx.log.info(s"The state result is ${x.value}")
+            .thenRun { x =>
+              ctx.log.info(s"The state result is ${x.value}")
             }
         case Multiply(amount) =>
           ctx.log.info(s"receive multiplying  for number: $amount and state is ${state.value}")
           val multiplied = Multiplied(persistenceId.toInt, amount)
           Effect
             .persist(multiplied)
-            .thenRun{
-              x=> ctx.log.info(s"The state result is ${x.value}")
+            .thenRun { x =>
+              ctx.log.info(s"The state result is ${x.value}")
             }
         case Divide(amount) =>
           ctx.log.info(s"receive dividing  for number: $amount and state is ${state.value}")
           val divided = Divided(persistenceId.toInt, amount)
           Effect
             .persist(divided)
-            .thenRun{
-              x=> ctx.log.info(s"The state result is ${x.value}")
+            .thenRun { x =>
+              ctx.log.info(s"The state result is ${x.value}")
             }
       }
 
@@ -88,7 +87,7 @@ object  akka_typed{
       }
 
     def apply(): Behavior[Command] =
-      Behaviors.setup{ ctx =>
+      Behaviors.setup { ctx =>
         EventSourcedBehavior[Command, Event, State](
           persistenceId = persId,
           State.empty,
@@ -96,164 +95,159 @@ object  akka_typed{
           (state, event) => handleEvent(state, event, ctx)
         )
       }
-
   }
 
+  // Result case class for state and offset
+  case class Result(state: Double, offset: Long)
 
   case class TypedCalculatorReadSide(system: ActorSystem[NotUsed]) {
     initDatabase
 
-    implicit  val materialiyer = system.classicSystem
+    // Add explicit types for implicit values
+    implicit val materializer: Materializer = Materializer(system.classicSystem)
+    implicit val ec: ExecutionContext = system.executionContext
 
-    var (offset, latestCalculatedResult) = getLatestOffsetAndResult
+    // Get latest offset and result
+    val (offset, latestCalculatedResult) = getLatestOffsetAndResult
     val startOffset = if (offset == 1) 1 else offset + 1
 
     val readJournal = PersistenceQuery(system).readJournalFor[CassandraReadJournal](
-      CassandraReadJournal.Identifier)
+      CassandraReadJournal.Identifier
+    )
 
-    /*
-   /**
-    * В read side приложения с архитектурой CQRS (объект TypedCalculatorReadSide в TypedCalculatorReadAndWriteSide.scala) необходимо разделить бизнес логику и запись в целевой получатель, т.е.
-    * 1) Persistence Query должно находиться в Source
-    * 2) Обновление состояния необходимо переместить в отдельный от записи в БД флоу
-    * 3) ! Задание со звездочкой: вместо CalculatorRepository создать Sink c любой БД (например Postgres из docker-compose файла).
-    * Для последнего задания пригодится документация - https://doc.akka.io/docs/alpakka/current/slick.html#using-a-slick-flow-or-sink
-    * Результат выполненного д.з. необходимо оформить либо на github gist либо PR к текущему репозиторию.
-    *
-    * */
-
-   как делать:
-   1. в типах int заменить на double
-   3. добавить функцию updateState в которой будет паттерн матчинг событий Added Multiplied Divided
-   4.создаете graphDsl  в котором: builder.add(source)
-   5. builder.add(Flow[EventEnvelope].map( e => updateState(e.event, e.seqNr)))
-    */
-
-
-
-
-    val source: Source[EventEnvelope, NotUsed] =
+    // 1. Source: Чтение событий из Persistence Query
+    val eventsSource: Source[EventEnvelope, NotUsed] =
       readJournal.eventsByPersistenceId("001", startOffset, Long.MaxValue)
 
-    /*
-   // homework, spoiler
-     def updateState(event: Any, seqNum: Long): Result ={
-       val newStste = event match {
-         case Added(_amount)=>
-           ???
-         case Multiplied(_,amount)=>
-           ???
-         case Divided(_amount)=>
-           ???
-       }
-       Result(newState, seqNum)
-     }
+    // 2. Flow: Извлечение событий из конвертов
+    val extractEventFlow: Flow[EventEnvelope, Any, NotUsed] =
+      Flow[EventEnvelope].map(_.event)
 
-     val graph = GraphDSL.create(){
-       implicit builder: GraphDSL.Builder[NotUsed] =>
-         //1.
-         val input = builder.add(source)
-         val stateUpdater = builder.add(Flow[EventEnvelope].map(e=> updateState(e.event, e.sequenceNr)))
-         val localSaveOutput = builder.add(Sink.foreach[Result]{
-           r=>
-             latestCalculatedResult = r.state
-             println("something to print")
-         })
-
-         val dbSaveOutput = builder.add(
-           Slick.sink[Result](r=> updatedResultAndOffset(r))
-         )
-
-         // надо разделить builder на 2  c помощью Broadcats
-         //см https://blog.rockthejvm.com/akka-streams-graphs/
-
-         //надо будет сохранить flow(разделенный на 2) в localSaveOutput и dbSaveOutput
-         //в конце закрыть граф и запустить его RunnableGraph.fromGraph(graph).run()
-
-
-
-
-     }*/
-
-    source.map{x=> println(x.toString())
-      x}
-      .runForeach{
-        event =>
-          event.event match {
-            case Added(_, amount) =>
-              latestCalculatedResult += amount
-              updatedResultAndOffset(latestCalculatedResult, event.sequenceNr)
-              println(s"Log from Added: $latestCalculatedResult")
-            case Multiplied(_, amount) =>
-              latestCalculatedResult *= amount
-              updatedResultAndOffset(latestCalculatedResult, event.sequenceNr)
-              println(s"Log from Multiplied: $latestCalculatedResult")
-            case Divided(_, amount) =>
-              latestCalculatedResult /= amount
-              updatedResultAndOffset(latestCalculatedResult, event.sequenceNr)
-              println(s"Log from Divided: $latestCalculatedResult")
+    // 3. Flow: Бизнес-логика - обновление состояния
+    val stateUpdateFlow: Flow[Any, Result, NotUsed] = 
+      Flow[Any].statefulMapConcat { () =>
+        var currentState = latestCalculatedResult
+        var currentOffset = startOffset - 1
+        
+        { event =>
+          val newState = event match {
+            case Added(_, amount) => currentState + amount
+            case Multiplied(_, amount) => currentState * amount
+            case Divided(_, amount) => currentState / amount
+            case _ => currentState
           }
+          currentOffset += 1
+          currentState = newState
+          List(Result(newState, currentOffset))
+        }
       }
+
+    // 4. Flow: Асинхронная запись в БД
+    val dbWriteFlow: Flow[Result, Result, NotUsed] =
+      Flow[Result].mapAsync(parallelism = 4) { result =>
+        Future {
+          updatedResultAndOffset(result.state, result.offset)
+          println(s"Saved to DB - State: ${result.state}, Offset: ${result.offset}")
+          result
+        }
+      }
+
+    // 5. Sink: Локальное логирование - правильное преобразование типа
+    val loggingSink: Sink[Result, NotUsed] = 
+      Sink.foreach[Result] { result =>
+        println(s"Local log - State: ${result.state}, Offset: ${result.offset}")
+      }.mapMaterializedValue(_ => NotUsed)
+
+    // 6. Sink: Завершающий sink для БД
+    val dbSink: Sink[Result, NotUsed] = 
+      Sink.ignore.mapMaterializedValue(_ => NotUsed)
+
+    // Построение графа обработки с использованием GraphDSL
+    val processingGraph: Graph[ClosedShape, NotUsed] = GraphDSL.create() { implicit builder =>
+      import GraphDSL.Implicits._
+
+      // Источник событий
+      val events = builder.add(eventsSource)
+      
+      // Извлечение событий
+      val eventExtractor = builder.add(extractEventFlow)
+      
+      // Обновление состояния
+      val stateUpdater = builder.add(stateUpdateFlow)
+      
+      // Разделение потока для логирования и записи в БД
+      val broadcast = builder.add(Broadcast[Result](2))
+      
+      // Запись в БД
+      val dbWriter = builder.add(dbWriteFlow)
+      
+      // Sink для БД
+      val databaseSink = builder.add(dbSink)
+      
+      // Sink для логирования
+      val logSink = builder.add(loggingSink)
+
+      // Соединение компонентов
+      events ~> eventExtractor ~> stateUpdater ~> broadcast
+      
+      // Первая ветвь: запись в БД
+      broadcast ~> dbWriter ~> databaseSink
+      
+      // Вторая ветвь: логирование
+      broadcast ~> logSink
+
+      ClosedShape
+    }
+
+    // Запуск обработки
+    def run(): Unit = {
+      RunnableGraph.fromGraph(processingGraph).run()
+    }
+
+    // Запуск при создании экземпляра
+    run()
   }
 
   object CalculatorRepository {
-    //homework how to do
-    //1.
-    /*    def createSession(): SlickSession ={
-          //создайте сессию согласно документации
-        }*/
     def initDatabase(): Unit = {
       val poolSettings = ConnectionPoolSettings(initialSize = 10, maxSize = 100)
       ConnectionPool.singleton("jdbc:postgresql://localhost:5432/demo", "docker", "docker", poolSettings)
     }
 
-    // homework
-    // case class Result(state: Double, offset:Long)
-    /*    def getLatestsOffsetAndResult: Result ={
-          val query = sql"select * from public.result where id = 1;"
-            .as[Double]
-            .headOption
-          //надо создать future для db.run
-          //с помошью await получите результат или прокиньте ошибку если результат нет
-
-        }*/
-
-    def getLatestOffsetAndResult: (Int, Double) = {
-      val entities =
-        DB readOnly { session =>
-          session.list("select * from public.result where id = 1;") {
-            row =>
-              (
-                row.int("write_side_offset"),
-                row.double("calculated_value")
-              )
-          }
-        }
-      entities.head
-    }
-
-    def updatedResultAndOffset(calcualted: Double, offset: Long): Unit =
-      {
-        using(DB(ConnectionPool.borrow())){
-          db =>
-            db.autoClose(true)
-            db.localTx{
-              _.update("update public.result set calculated_value=?, write_side_offset=? where id=1",
-                calcualted, offset)
-            }
+    def getLatestOffsetAndResult: (Long, Double) = {
+      val entities = DB readOnly { session =>
+        session.list("select * from public.result where id = 1;") { row =>
+          (
+            row.long("write_side_offset"),
+            row.double("calculated_value")
+          )
         }
       }
+      entities.headOption.getOrElse((0L, 0.0))
+    }
+
+    def updatedResultAndOffset(calculated: Double, offset: Long): Unit = {
+      using(DB(ConnectionPool.borrow())) { db =>
+        db.autoClose(true)
+        db.localTx { session =>
+          session.update(
+            "update public.result set calculated_value = ?, write_side_offset = ? where id = 1",
+            calculated,
+            offset
+          )
+        }
+      }
+    }
   }
 
   def apply(): Behavior[NotUsed] =
-    Behaviors.setup{
-      ctx =>
-        val writeAcorRef = ctx.spawn(TypedCalculatorWriteSide(), "Calc", Props.empty)
-        writeAcorRef ! Add(10)
-        writeAcorRef ! Multiply(2)
-        writeAcorRef ! Divide(5)
+    Behaviors.setup { ctx =>
+      val writeActorRef = ctx.spawn(TypedCalculatorWriteSide(), "Calc", Props.empty)
+      writeActorRef ! Add(10)
+      writeActorRef ! Multiply(2)
+      writeActorRef ! Divide(5)
 
-        Behaviors.same
+      Behaviors.same
     }
 
   def main(args: Array[String]): Unit = {
@@ -262,8 +256,9 @@ object  akka_typed{
 
     implicit val system: ActorSystem[NotUsed] = ActorSystem(value, "akka_typed", config)
     TypedCalculatorReadSide(system)
-    implicit  val actorContext = system.executionContext
-
+    
+    // Keep the system running
+    Thread.sleep(5000)
+    system.terminate()
   }
-
 }
