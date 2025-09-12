@@ -11,7 +11,7 @@ import akka_typed.CalculatorRepository.{getLatestOffsetAndResult, initDatabase, 
 import akka_typed.TypedCalculatorWriteSide.{Add, Added, Command, Divide, Divided, Multiplied, Multiply}
 import com.typesafe.config.ConfigFactory
 import scalikejdbc.{ConnectionPool, ConnectionPoolSettings, DB, using}
-import scala.concurrent.ExecutionContext
+import scala.concurrent.{ExecutionContext, Future}
 
 object akka_typed {
 
@@ -115,71 +115,97 @@ object akka_typed {
       CassandraReadJournal.Identifier
     )
 
-    // Function to update state based on events
-    def updateState(event: Any, currentState: Double): Double = {
-      event match {
-        case Added(_, amount) =>
-          currentState + amount
-        case Multiplied(_, amount) =>
-          currentState * amount
-        case Divided(_, amount) =>
-          currentState / amount
-      }
-    }
-
-    // Create the source from persistence query
-    val source: Source[EventEnvelope, NotUsed] =
+    // 1. Source: Чтение событий из Persistence Query
+    val eventsSource: Source[EventEnvelope, NotUsed] =
       readJournal.eventsByPersistenceId("001", startOffset, Long.MaxValue)
 
-    // Flow to process events and update state
-    val stateUpdateFlow: Flow[EventEnvelope, Result, NotUsed] = 
-      Flow[EventEnvelope].statefulMapConcat { () =>
+    // 2. Flow: Извлечение событий из конвертов
+    val extractEventFlow: Flow[EventEnvelope, Any, NotUsed] =
+      Flow[EventEnvelope].map(_.event)
+
+    // 3. Flow: Бизнес-логика - обновление состояния
+    val stateUpdateFlow: Flow[Any, Result, NotUsed] = 
+      Flow[Any].statefulMapConcat { () =>
         var currentState = latestCalculatedResult
+        var currentOffset = startOffset - 1
         
-        { envelope =>
-          val newState = updateState(envelope.event, currentState)
+        { event =>
+          val newState = event match {
+            case Added(_, amount) => currentState + amount
+            case Multiplied(_, amount) => currentState * amount
+            case Divided(_, amount) => currentState / amount
+            case _ => currentState
+          }
+          currentOffset += 1
           currentState = newState
-          List(Result(newState, envelope.sequenceNr))
+          List(Result(newState, currentOffset))
         }
-    }
+      }
 
-    // Sink for local logging - use .mapMaterializedValue to convert to NotUsed
-    val localLogSink: Sink[Result, NotUsed] = Sink.foreach[Result] { result =>
-      println(s"Local log - State: ${result.state}, Offset: ${result.offset}")
-    }.mapMaterializedValue(_ => NotUsed)
+    // 4. Flow: Асинхронная запись в БД
+    val dbWriteFlow: Flow[Result, Result, NotUsed] =
+      Flow[Result].mapAsync(parallelism = 4) { result =>
+        Future {
+          updatedResultAndOffset(result.state, result.offset)
+          println(s"Saved to DB - State: ${result.state}, Offset: ${result.offset}")
+          result
+        }
+      }
 
-    // Sink for database persistence - use .mapMaterializedValue to convert to NotUsed
-    val dbSink: Sink[Result, NotUsed] = Sink.foreach[Result] { result =>
-      updatedResultAndOffset(result.state, result.offset)
-      println(s"Saved to DB - State: ${result.state}, Offset: ${result.offset}")
-    }.mapMaterializedValue(_ => NotUsed)
+    // 5. Sink: Локальное логирование - правильное преобразование типа
+    val loggingSink: Sink[Result, NotUsed] = 
+      Sink.foreach[Result] { result =>
+        println(s"Local log - State: ${result.state}, Offset: ${result.offset}")
+      }.mapMaterializedValue(_ => NotUsed)
 
-    // Build the graph using GraphDSL
-    val graph: Graph[ClosedShape, NotUsed] = GraphDSL.create() { implicit builder =>
+    // 6. Sink: Завершающий sink для БД
+    val dbSink: Sink[Result, NotUsed] = 
+      Sink.ignore.mapMaterializedValue(_ => NotUsed)
+
+    // Построение графа обработки с использованием GraphDSL
+    val processingGraph: Graph[ClosedShape, NotUsed] = GraphDSL.create() { implicit builder =>
       import GraphDSL.Implicits._
 
-      // Source
-      val input = builder.add(source)
+      // Источник событий
+      val events = builder.add(eventsSource)
       
-      // State update flow
+      // Извлечение событий
+      val eventExtractor = builder.add(extractEventFlow)
+      
+      // Обновление состояния
       val stateUpdater = builder.add(stateUpdateFlow)
       
-      // Broadcast to split the stream
+      // Разделение потока для логирования и записи в БД
       val broadcast = builder.add(Broadcast[Result](2))
       
-      // Sinks
-      val localSink = builder.add(localLogSink)
+      // Запись в БД
+      val dbWriter = builder.add(dbWriteFlow)
+      
+      // Sink для БД
       val databaseSink = builder.add(dbSink)
+      
+      // Sink для логирования
+      val logSink = builder.add(loggingSink)
 
-      // Connect the graph
-      input ~> stateUpdater ~> broadcast ~> localSink
-                       broadcast ~> databaseSink
+      // Соединение компонентов
+      events ~> eventExtractor ~> stateUpdater ~> broadcast
+      
+      // Первая ветвь: запись в БД
+      broadcast ~> dbWriter ~> databaseSink
+      
+      // Вторая ветвь: логирование
+      broadcast ~> logSink
 
       ClosedShape
     }
 
-    // Run the graph
-    RunnableGraph.fromGraph(graph).run()
+    // Запуск обработки
+    def run(): Unit = {
+      RunnableGraph.fromGraph(processingGraph).run()
+    }
+
+    // Запуск при создании экземпляра
+    run()
   }
 
   object CalculatorRepository {
@@ -230,5 +256,9 @@ object akka_typed {
 
     implicit val system: ActorSystem[NotUsed] = ActorSystem(value, "akka_typed", config)
     TypedCalculatorReadSide(system)
+    
+    // Keep the system running
+    Thread.sleep(5000)
+    system.terminate()
   }
 }
