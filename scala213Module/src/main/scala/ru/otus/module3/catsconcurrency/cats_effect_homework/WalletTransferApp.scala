@@ -15,11 +15,12 @@ import Wallet.{BalanceTooLow, WalletError}
 
 // Для такой задачи хорошо подойдет cats.effect.kernel.Ref - ячейка памяти с атомарным доступом.
 // Нужно сделать интерпретатор Wallet[IO] который будет использовать Ref и запустить тест с помощью такого Wallet.
+
 object WalletTransferApp extends IOApp.Simple {
 
   // функция, которую мы тестируем. Здесь менять ничего не нужно :)
   def transfer[F[_]: Monad](a: Wallet[F],
-                            b: Wallet[F],
+                            b: Wallet[F], 
                             amount: BigDecimal): F[Unit] =
     a.withdraw(amount).flatMap {
       case Left(BalanceTooLow) => a.topup(amount)
@@ -27,16 +28,19 @@ object WalletTransferApp extends IOApp.Simple {
     }
 
   // todo: реализовать интерпретатор (не забывая про ошибку списания при недостаточных средствах)
-  final class InMemWallet[F[_]](ref: Ref[F, BigDecimal]) extends Wallet[F] {
-    def balance: F[BigDecimal] = ???
-    def topup(amount: BigDecimal): F[Unit] = ???
-    def withdraw(amount: BigDecimal): F[Either[WalletError, Unit]] = ???
+  final class InMemWallet[F[_]](ref: Ref[F, BigDecimal])(implicit F: Monad[F]) extends Wallet[F] {
+    def balance: F[BigDecimal] = ref.get
+    def topup(amount: BigDecimal): F[Unit] = ref.update(_ + amount)
+    def withdraw(amount: BigDecimal): F[Either[WalletError, Unit]] = 
+      ref.modify { current =>
+        if (current >= amount) (current - amount, Right(()))
+        else (current, Left(BalanceTooLow))
+      }
   }
 
-  // todo: реализовать конструктор. Снова хитрая сигнатура, потому что создание Ref - это побочный эффект
-  def wallet(balance: BigDecimal): IO[Wallet[IO]] = ???
+  def wallet(balance: BigDecimal): IO[Wallet[IO]] = 
+    Ref.of[IO, BigDecimal](balance).map(ref => new InMemWallet[IO](ref))
 
-  // а это тест, который выполняет перевод с одного кошелька на другой и выводит балансы после операции. Тоже менять не нужно
   def testTransfer: IO[(BigDecimal, BigDecimal)] =
     for {
       w1 <- wallet(100)
@@ -47,8 +51,6 @@ object WalletTransferApp extends IOApp.Simple {
     } yield (b1, b2)
 
   def run: IO[Unit] = {
-    // 50, 250
     testTransfer.flatMap { case (b1, b2) => IO.println(s"$b1,$b2") }
   }
-
 }
