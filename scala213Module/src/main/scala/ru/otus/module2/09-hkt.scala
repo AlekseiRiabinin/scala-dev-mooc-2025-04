@@ -12,8 +12,37 @@ object higher_kinded_types{
     a.flatMap{ a => b.map((a, _))}
 
 
+  // General Monad typeclass (hw5)
+  trait Monad[F[_]] {
+    def pure[A](a: A): F[A]
+    def flatMap[A, B](fa: F[A])(f: A => F[B]): F[B]
+    def map[A, B](fa: F[A])(f: A => B): F[B] = flatMap(fa)(a => pure(f(a)))
+  }
 
-  def tupleF[F[_], A, B](fa: F[A], fb: F[B]): F[(A, B)] = ???
+  // General tupleF implementation using Monad (hw5)
+  def tupleF[F[_], A, B](fa: F[A], fb: F[B])(implicit m: Monad[F]): F[(A, B)] =
+    m.flatMap(fa)(a => m.map(fb)(b => (a, b)))
+
+  // Monad instances for common types (hw5)
+  object MonadInstances {
+    implicit val optionMonad: Monad[Option] = new Monad[Option] {
+      def pure[A](a: A): Option[A] = Some(a)
+      def flatMap[A, B](fa: Option[A])(f: A => Option[B]): Option[B] = fa.flatMap(f)
+    }
+
+    implicit val listMonad: Monad[List] = new Monad[List] {
+      def pure[A](a: A): List[A] = List(a)
+      def flatMap[A, B](fa: List[A])(f: A => List[B]): List[B] = fa.flatMap(f)
+    }
+
+    implicit def eitherMonad[E]: Monad[({ type L[A] = Either[E, A] })#L] = 
+      new Monad[({ type L[A] = Either[E, A] })#L] {
+        def pure[A](a: A): Either[E, A] = Right(a)
+        def flatMap[A, B](fa: Either[E, A])(f: A => Either[E, B]): Either[E, B] = 
+          fa.flatMap(f)
+      }
+  }
+
 
   trait Bindable[F[_], A] {
     def map[B](f: A => B): F[B]
